@@ -1,4 +1,4 @@
-import { google } from "googleapis";
+import { google, auth as GoogleAuth } from "googleapis";
 import axios from "axios";
 import winston from "winston";
 import fs from "fs";
@@ -24,7 +24,7 @@ async function authenticateGoogleSheets(encodedKey) {
   const jsonKey = Buffer.from(encodedKey, "base64").toString("utf8");
   await fs.promises.writeFile(tempFilePath, jsonKey);
 
-  const auth = new google.auth.GoogleAuth({
+  const auth = new GoogleAuth.GoogleAuth({
     keyFile: tempFilePath,
     scopes: ["https://www.googleapis.com/auth/spreadsheets"],
   });
