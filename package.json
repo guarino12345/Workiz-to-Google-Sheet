@@ -3,8 +3,8 @@
   "version": "1.0.0",
   "main": "api/sync.js",
   "dependencies": {
-    "axios": "^0.21.1",
-    "googleapis": "^39.2.0",
+    "axios": "^1.9.0",
+    "googleapis": "^149.0.0",
     "winston": "^3.3.3"
   }
 }
