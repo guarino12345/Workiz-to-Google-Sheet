@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Workiz to Google Sheets Sync</title>
+    <style>
+      :root {
+        --primary-color: #4a90e2;
+        --background-color: #f5f7fa;
+        --accent-color: #50e3c2;
+        --text-color: #333;
+        --border-radius: 8px;
+      }
+
+      body {
+        font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+        background: var(--background-color);
+        margin: 0;
+        padding: 2rem;
+        display: flex;
+        justify-content: center;
+        align-items: flex-start;
+        min-height: 100vh;
+      }
+
+      .container {
+        background: white;
+        padding: 2rem 3rem;
+        border-radius: var(--border-radius);
+        box-shadow: 0 8px 20px rgb(74 144 226 / 0.2);
+        max-width: 400px;
+        width: 100%;
+        text-align: center;
+      }
+
+      h1 {
+        color: var(--primary-color);
+        margin-bottom: 1rem;
+        font-weight: 700;
+      }
+
+      label {
+        display: block;
+        margin-bottom: 0.5rem;
+        font-weight: 600;
+        color: var(--text-color);
+        text-align: left;
+      }
+
+      input[type="date"] {
+        width: 100%;
+        padding: 0.5rem 0.75rem;
+        font-size: 1rem;
+        border: 2px solid #d0d7de;
+        border-radius: var(--border-radius);
+        transition: border-color 0.3s ease;
+        box-sizing: border-box;
+      }
+
+      input[type="date"]:focus {
+        border-color: var(--accent-color);
+        outline: none;
+      }
+
+      button {
+        margin-top: 1.5rem;
+        background: var(--primary-color);
+        color: white;
+        border: none;
+        padding: 0.75rem 1.5rem;
+        font-size: 1.1rem;
+        font-weight: 700;
+        border-radius: var(--border-radius);
+        cursor: pointer;
+        width: 100%;
+        transition: background 0.3s ease;
+      }
+
+      button:disabled {
+        background: #a0b9d9;
+        cursor: not-allowed;
+      }
+
+      button:hover:enabled {
+        background: #3b78d8;
+      }
+
+      .progress-container {
+        margin-top: 2rem;
+        background: #e0e0e0;
+        border-radius: var(--border-radius);
+        overflow: hidden;
+        height: 24px;
+        width: 100%;
+        box-shadow: inset 0 2px 5px rgb(0 0 0 / 0.1);
+      }
+
+      .progress-bar {
+        height: 100%;
+        width: 0;
+        background: var(--accent-color);
+        border-radius: var(--border-radius);
+        transition: width 0.3s ease;
+        text-align: center;
+        color: white;
+        font-weight: 700;
+        line-height: 24px;
+        user-select: none;
+      }
+
+      .status-text {
+        margin-top: 1rem;
+        font-style: italic;
+        color: var(--primary-color);
+        min-height: 1.2em;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container" role="main" aria-label="Sync interface">
+      <h1>Workiz to Google Sheets Sync</h1>
+      <form id="sync-form">
+        <label for="start-date">Select Start Date</label>
+        <input
+          type="date"
+          id="start-date"
+          name="start-date"
+          required
+          aria-required="true"
+        />
+        <button type="submit" id="sync-button">Start Sync</button>
+      </form>
+      <div class="progress-container" aria-hidden="true">
+        <div class="progress-bar" id="progress-bar">0%</div>
+      </div>
+      <div
+        class="status-text"
+        role="status"
+        aria-live="polite"
+        id="status-text"
+      ></div>
+    </div>
+
+    <script>
+      const form = document.getElementById("sync-form");
+      const progressBar = document.getElementById("progress-bar");
+      const statusText = document.getElementById("status-text");
+      const syncButton = document.getElementById("sync-button");
+      const startDateInput = document.getElementById("start-date");
+
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+
+        const startDate = startDateInput.value;
+        if (!startDate) {
+          alert("Please select a start date.");
+          return;
+        }
+
+        startDateInput.disabled = true;
+        syncButton.disabled = true;
+        progressBar.style.width = "0%";
+        progressBar.textContent = "0%";
+        statusText.textContent = "Starting sync...";
+
+        try {
+          // Since the serverless function runs asynchronously and may take some time,
+          // we simulate progress bar until response arrives.
+          let progress = 0;
+          const progressInterval = setInterval(() => {
+            if (progress < 90) {
+              progress += Math.random() * 10; // Increment randomly up to 90%
+              if (progress > 90) progress = 90;
+              progressBar.style.width = progress.toFixed(0) + "%";
+              progressBar.textContent = progress.toFixed(0) + "%";
+            }
+          }, 500);
+
+          const response = await fetch("/api/sync", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ startDate }),
+          });
+
+          clearInterval(progressInterval);
+
+          if (response.ok) {
+            const data = await response.json();
+            progressBar.style.width = "100%";
+            progressBar.textContent = "100%";
+            statusText.textContent =
+              data.message +
+              (data.jobsSynced ? ` (${data.jobsSynced} jobs synced)` : "");
+          } else {
+            const err = await response.json();
+            statusText.textContent =
+              "Error during sync: " + (err.error || response.statusText);
+            progressBar.style.width = "0%";
+            progressBar.textContent = "0%";
+          }
+        } catch (error) {
+          statusText.textContent = "Network error: " + error.message;
+          progressBar.style.width = "0%";
+          progressBar.textContent = "0%";
+        } finally {
+          syncButton.disabled = false;
+          startDateInput.disabled = false;
+        }
+      });
+    </script>
+  </body>
+</html>
