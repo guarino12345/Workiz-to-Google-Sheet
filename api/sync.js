@@ -4,30 +4,45 @@ import winston from "winston";
 import fs from "fs";
 import os from "os";
 import path from "path";
-// Other code...
-async function authenticateGoogleSheets() {
-  const keyFilePath = path.join(
-    os.tmpdir(),
-    `vercel-google-creds-${Date.now()}.json`
-  );
-  const encodedKey = process.env.GOOGLE_APPLICATION_CREDENTIALS;
-  // Decode the Base64 string and write it to a temporary file
-  const jsonKey = Buffer.from(encodedKey, "base64").toString("utf-8");
-  await fs.promises.writeFile(keyFilePath, jsonKey);
+
+// Setup logger
+const logger = winston.createLogger({
+  level: "info",
+  format: winston.format.combine(
+    winston.format.timestamp({ format: "YYYY-MM-DD HH:mm:ss" }),
+    winston.format.printf(
+      (info) =>
+        `${info.timestamp} [${info.level.toUpperCase()}] ${info.message}`
+    )
+  ),
+  transports: [new winston.transports.Console()],
+});
+
+// Authenticate with Google Sheets using base64-encoded service account key
+async function authenticateGoogleSheets(encodedKey) {
+  const tempFilePath = path.join(os.tmpdir(), `gcreds-${Date.now()}.json`);
+  const jsonKey = Buffer.from(encodedKey, "base64").toString("utf8");
+  await fs.promises.writeFile(tempFilePath, jsonKey);
+
   const auth = new google.auth.GoogleAuth({
-    keyFile: keyFilePath,
+    keyFile: tempFilePath,
     scopes: ["https://www.googleapis.com/auth/spreadsheets"],
   });
+
   const authClient = await auth.getClient();
   google.options({ auth: authClient });
-  fs.unlink(keyFilePath, (err) => {
-    if (err) console.warn(`Failed to delete temp creds file: ${err.message}`);
+
+  fs.unlink(tempFilePath, (err) => {
+    if (err) logger.warn(`Failed to delete temp creds file: ${err.message}`);
   });
-  console.info("Authenticated with Google Sheets API.");
+
+  logger.info("Authenticated with Google Sheets API.");
+  return google.sheets("v4");
 }
 
-async function fetchJobs(startDate) {
-  const baseURL = `https://api.workiz.com/api/v1/${WORKIZ_API_TOKEN}/job/all/`;
+// Fetch job list from Workiz API
+async function fetchJobs(apiToken, startDate) {
+  const url = `https://api.workiz.com/api/v1/${apiToken}/job/all/`;
   const params = {
     start_date: startDate,
     offset: 0,
@@ -35,38 +50,31 @@ async function fetchJobs(startDate) {
     only_open: false,
   };
 
-  logger.info(`Fetching jobs from Workiz API starting from ${startDate}`);
-
+  logger.info(`Fetching jobs from ${startDate}`);
   try {
-    const response = await axios.get(baseURL, { params, timeout: 15000 });
-    const jobs = response.data.data || [];
-    logger.info(`Fetched ${jobs.length} jobs.`);
-    return jobs;
+    const response = await axios.get(url, { params, timeout: 15000 });
+    return response.data.data || [];
   } catch (error) {
-    if (error.response) {
-      logger.error(`Workiz API error: ${JSON.stringify(error.response.data)}`);
-    } else {
-      logger.error(`Network or other error: ${error.message}`);
-    }
+    const msg = error.response
+      ? JSON.stringify(error.response.data)
+      : error.message;
+    logger.error(`Workiz API error: ${msg}`);
     throw error;
   }
 }
 
-async function getSheetRows() {
+async function getSheetRows(sheets, spreadsheetId, sheetName) {
   const res = await sheets.spreadsheets.values.get({
-    spreadsheetId: SPREADSHEET_ID,
-    range: `${SHEET_NAME}!A2:Z`,
+    spreadsheetId,
+    range: `${sheetName}!A2:Z`,
   });
   const rows = res.data.values || [];
-  logger.info(`Retrieved ${rows.length} rows from sheet.`);
+  logger.info(`Retrieved ${rows.length} rows from Google Sheet.`);
   return rows;
 }
 
 function findRowIndex(rows, jobUUID) {
-  for (let i = 0; i < rows.length; i++) {
-    if (rows[i][0] === jobUUID) return i;
-  }
-  return -1;
+  return rows.findIndex((row) => row[0] === jobUUID);
 }
 
 function formatJobData(job) {
@@ -111,6 +119,7 @@ function formatJobData(job) {
     "ServiceArea",
     "LastStatusUpdate",
   ];
+
   return fields.map((field) => {
     let val = job[field];
     if (Array.isArray(val)) {
@@ -126,90 +135,105 @@ function formatJobData(job) {
   });
 }
 
-async function updateSheetRow(rowNumber, rowValues) {
-  const range = `${SHEET_NAME}!A${rowNumber}:Z${rowNumber}`;
+async function updateSheetRow(
+  sheets,
+  spreadsheetId,
+  sheetName,
+  rowNumber,
+  values
+) {
+  const range = `${sheetName}!A${rowNumber}:Z${rowNumber}`;
   await sheets.spreadsheets.values.update({
-    spreadsheetId: SPREADSHEET_ID,
+    spreadsheetId,
     range,
     valueInputOption: "RAW",
-    requestBody: { values: [rowValues] },
+    requestBody: { values: [values] },
   });
-  logger.info(`Updated row #${rowNumber} for job ${rowValues[0]}`);
+  logger.info(`Updated row #${rowNumber} for job ${values[0]}`);
 }
 
-async function appendSheetRow(rowValues) {
+async function appendSheetRow(sheets, spreadsheetId, sheetName, values) {
   await sheets.spreadsheets.values.append({
-    spreadsheetId: SPREADSHEET_ID,
-    range: `${SHEET_NAME}!A1:Z1`,
+    spreadsheetId,
+    range: `${sheetName}!A1:Z1`,
     valueInputOption: "RAW",
     insertDataOption: "INSERT_ROWS",
-    requestBody: { values: [rowValues] },
+    requestBody: { values: [values] },
   });
-  logger.info(`Appended new row for job ${rowValues[0]}`);
+  logger.info(`Appended new row for job ${values[0]}`);
 }
 
-async function syncJobsWithSheet(jobs) {
-  const sheetRows = await getSheetRows();
+async function syncJobsWithSheet(sheets, spreadsheetId, sheetName, jobs) {
+  const rows = await getSheetRows(sheets, spreadsheetId, sheetName);
 
   for (const job of jobs) {
-    const jobUUID = job.UUID;
-    if (!jobUUID) {
-      logger.warn("Job without UUID found, skipping.");
+    const uuid = job.UUID;
+    if (!uuid) {
+      logger.warn("Skipping job with missing UUID");
       continue;
     }
-    const rowData = formatJobData(job);
-    const rowIndex = findRowIndex(sheetRows, jobUUID);
 
-    if (rowIndex !== -1) {
-      await updateSheetRow(rowIndex + 2, rowData);
-      sheetRows[rowIndex] = rowData;
+    const data = formatJobData(job);
+    const index = findRowIndex(rows, uuid);
+
+    if (index !== -1) {
+      await updateSheetRow(sheets, spreadsheetId, sheetName, index + 2, data);
+      rows[index] = data;
     } else {
-      await appendSheetRow(rowData);
-      sheetRows.push(rowData);
+      await appendSheetRow(sheets, spreadsheetId, sheetName, data);
+      rows.push(data);
     }
   }
 }
 
+// MAIN HANDLER
 export default async function handler(req, res) {
   if (req.method !== "POST") {
-    return res.status(405).json({ error: "Method Not Allowed, use POST" });
+    return res.status(405).json({ error: "Use POST only." });
   }
 
-  if (!WORKIZ_API_TOKEN || !SPREADSHEET_ID || !GOOGLE_SERVICE_ACCOUNT_KEY) {
-    return res
-      .status(500)
-      .json({ error: "Missing environment variables required for sync." });
+  const {
+    WORKIZ_API_TOKEN,
+    SPREADSHEET_ID,
+    GOOGLE_APPLICATION_CREDENTIALS,
+    SHEET_NAME = "Sheet1",
+  } = process.env;
+
+  if (!WORKIZ_API_TOKEN || !SPREADSHEET_ID || !GOOGLE_APPLICATION_CREDENTIALS) {
+    return res.status(500).json({
+      error:
+        "Missing environment variables: WORKIZ_API_TOKEN, SPREADSHEET_ID, or GOOGLE_APPLICATION_CREDENTIALS.",
+    });
   }
 
   const { startDate } = req.body;
-  let effectiveStartDate = startDate;
+  let dateToUse = startDate;
 
   if (!startDate || !/^\d{4}-\d{2}-\d{2}$/.test(startDate)) {
-    const dayBefore = new Date();
-    dayBefore.setDate(dayBefore.getDate() - 7);
-    effectiveStartDate = dayBefore.toISOString().split("T")[0];
+    const fallback = new Date();
+    fallback.setDate(fallback.getDate() - 7);
+    dateToUse = fallback.toISOString().split("T")[0];
   }
 
-  logger.info(`Received sync request with start date: ${effectiveStartDate}`);
+  logger.info(`Received sync request starting from ${dateToUse}`);
 
   try {
-    await authenticateGoogleSheets();
-    const jobs = await fetchJobs(effectiveStartDate);
+    const sheets = await authenticateGoogleSheets(
+      GOOGLE_APPLICATION_CREDENTIALS
+    );
+    const jobs = await fetchJobs(WORKIZ_API_TOKEN, dateToUse);
 
-    if (jobs.length === 0) {
-      logger.info("No jobs to sync.");
-      return res.status(200).json({ message: "No jobs retrieved to sync." });
+    if (!jobs.length) {
+      return res.status(200).json({ message: "No jobs found." });
     }
 
-    await syncJobsWithSheet(jobs);
+    await syncJobsWithSheet(sheets, SPREADSHEET_ID, SHEET_NAME, jobs);
 
-    logger.info("Sync completed successfully.");
-    res.status(200).json({
-      message: "Sync completed successfully.",
-      jobsSynced: jobs.length,
-    });
-  } catch (error) {
-    logger.error(`Sync failed: ${error.message}`);
-    res.status(500).json({ error: `Sync failed: ${error.message}` });
+    res
+      .status(200)
+      .json({ message: "Sync complete.", jobsSynced: jobs.length });
+  } catch (err) {
+    logger.error(`Sync failed: ${err.message}`);
+    res.status(500).json({ error: `Sync failed: ${err.message}` });
   }
 }
