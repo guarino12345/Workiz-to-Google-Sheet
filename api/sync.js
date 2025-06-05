@@ -1,7 +1,7 @@
 import { google } from "googleapis";
 import axios from "axios";
 import winston from "winston";
-import fs from "fs";
+import fs from "fs/promises";
 import os from "os";
 import path from "path";
 
@@ -22,7 +22,7 @@ const logger = winston.createLogger({
 async function authenticateGoogleSheets(encodedKey) {
   const tempFilePath = path.join(os.tmpdir(), `gcreds-${Date.now()}.json`);
   const jsonKey = Buffer.from(encodedKey, "base64").toString("utf8");
-  await fs.promises.writeFile(tempFilePath, jsonKey);
+  await fs.writeFile(tempFilePath, jsonKey);
 
   const auth = new google.auth.GoogleAuth({
     keyFile: tempFilePath,
@@ -32,9 +32,10 @@ async function authenticateGoogleSheets(encodedKey) {
   const authClient = await auth.getClient();
   google.options({ auth: authClient });
 
-  fs.unlink(tempFilePath, (err) => {
-    if (err) logger.warn(`Failed to delete temp creds file: ${err.message}`);
-  });
+  // Clean up the temp file asynchronously (don’t block)
+  fs.unlink(tempFilePath).catch((err) =>
+    logger.warn(`Failed to delete temp creds file: ${err.message}`)
+  );
 
   logger.info("Authenticated with Google Sheets API.");
   return google.sheets("v4");

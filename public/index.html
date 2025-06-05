@@ -98,7 +98,7 @@
 
       .progress-bar {
         height: 100%;
-        width: 0;
+        width: 0%;
         background: var(--accent-color);
         border-radius: var(--border-radius);
         transition: width 0.3s ease;
@@ -167,13 +167,14 @@
         statusText.textContent = "Starting sync...";
 
         try {
+          // Simulate progress until response arrives
           let progress = 0;
           const progressInterval = setInterval(() => {
             if (progress < 90) {
               progress += Math.random() * 10;
               if (progress > 90) progress = 90;
-              progressBar.style.width = progress.toFixed(0) + "%";
-              progressBar.textContent = progress.toFixed(0) + "%";
+              progressBar.style.width = `${progress.toFixed(0)}%`;
+              progressBar.textContent = `${progress.toFixed(0)}%`;
             }
           }, 500);
 
@@ -187,7 +188,6 @@
 
           if (!response.ok) {
             const errorText = await response.text();
-            console.error("Error response from server:", errorText);
             statusText.textContent = `Server Error: ${
               errorText || response.statusText
             }`;
@@ -203,7 +203,6 @@
             data.message +
             (data.jobsSynced ? ` (${data.jobsSynced} jobs synced)` : "");
         } catch (error) {
-          console.error("Network or parsing error:", error);
           statusText.textContent = "Network or parsing error: " + error.message;
           progressBar.style.width = "0%";
           progressBar.textContent = "0%";
