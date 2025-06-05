@@ -114,6 +114,8 @@
         font-style: italic;
         color: var(--primary-color);
         min-height: 1.2em;
+        white-space: pre-wrap;
+        word-wrap: break-word;
       }
     </style>
   </head>
@@ -165,12 +167,10 @@
         statusText.textContent = "Starting sync...";
 
         try {
-          // Since the serverless function runs asynchronously and may take some time,
-          // we simulate progress bar until response arrives.
           let progress = 0;
           const progressInterval = setInterval(() => {
             if (progress < 90) {
-              progress += Math.random() * 10; // Increment randomly up to 90%
+              progress += Math.random() * 10;
               if (progress > 90) progress = 90;
               progressBar.style.width = progress.toFixed(0) + "%";
               progressBar.textContent = progress.toFixed(0) + "%";
@@ -185,22 +185,26 @@
 
           clearInterval(progressInterval);
 
-          if (response.ok) {
-            const data = await response.json();
-            progressBar.style.width = "100%";
-            progressBar.textContent = "100%";
-            statusText.textContent =
-              data.message +
-              (data.jobsSynced ? ` (${data.jobsSynced} jobs synced)` : "");
-          } else {
-            const err = await response.json();
-            statusText.textContent =
-              "Error during sync: " + (err.error || response.statusText);
+          if (!response.ok) {
+            const errorText = await response.text();
+            console.error("Error response from server:", errorText);
+            statusText.textContent = `Server Error: ${
+              errorText || response.statusText
+            }`;
             progressBar.style.width = "0%";
             progressBar.textContent = "0%";
+            return;
           }
+
+          const data = await response.json();
+          progressBar.style.width = "100%";
+          progressBar.textContent = "100%";
+          statusText.textContent =
+            data.message +
+            (data.jobsSynced ? ` (${data.jobsSynced} jobs synced)` : "");
         } catch (error) {
-          statusText.textContent = "Network error: " + error.message;
+          console.error("Network or parsing error:", error);
+          statusText.textContent = "Network or parsing error: " + error.message;
           progressBar.style.width = "0%";
           progressBar.textContent = "0%";
         } finally {

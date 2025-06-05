@@ -22,16 +22,11 @@ const logger = winston.createLogger({
   transports: [new winston.transports.Console()],
 });
 
-if (!WORKIZ_API_TOKEN || !SPREADSHEET_ID || !GOOGLE_SERVICE_ACCOUNT_KEY) {
-  logger.error("Missing required environment variables.");
-}
-
 const sheets = google.sheets("v4");
 
 async function createTempGoogleCredsFile() {
-  const tempDir = os.tmpdir();
   const tempFilePath = path.join(
-    tempDir,
+    os.tmpdir(),
     `vercel-google-creds-${Date.now()}.json`
   );
   await fs.promises.writeFile(tempFilePath, GOOGLE_SERVICE_ACCOUNT_KEY);
@@ -39,9 +34,6 @@ async function createTempGoogleCredsFile() {
 }
 
 async function authenticateGoogleSheets() {
-  if (!GOOGLE_SERVICE_ACCOUNT_KEY) {
-    throw new Error("Google service account key missing");
-  }
   const keyFilePath = await createTempGoogleCredsFile();
 
   const auth = new google.auth.GoogleAuth({
@@ -72,17 +64,13 @@ async function fetchJobs(startDate) {
   try {
     const response = await axios.get(baseURL, { params, timeout: 15000 });
     const jobs = response.data.data || [];
-    logger.info(`Fetched ${jobs.length} jobs from Workiz API.`);
+    logger.info(`Fetched ${jobs.length} jobs.`);
     return jobs;
   } catch (error) {
     if (error.response) {
-      logger.error(
-        `Error fetching jobs from Workiz API: ${JSON.stringify(
-          error.response.data
-        )}`
-      );
+      logger.error(`Workiz API error: ${JSON.stringify(error.response.data)}`);
     } else {
-      logger.error(`Error fetching jobs from Workiz API: ${error.message}`);
+      logger.error(`Network or other error: ${error.message}`);
     }
     throw error;
   }
@@ -94,15 +82,13 @@ async function getSheetRows() {
     range: `${SHEET_NAME}!A2:Z`,
   });
   const rows = res.data.values || [];
-  logger.info(`Retrieved ${rows.length} rows from Google Sheet.`);
+  logger.info(`Retrieved ${rows.length} rows from sheet.`);
   return rows;
 }
 
 function findRowIndex(rows, jobUUID) {
   for (let i = 0; i < rows.length; i++) {
-    if (rows[i][0] === jobUUID) {
-      return i;
-    }
+    if (rows[i][0] === jobUUID) return i;
   }
   return -1;
 }
@@ -149,23 +135,18 @@ function formatJobData(job) {
     "ServiceArea",
     "LastStatusUpdate",
   ];
-
   return fields.map((field) => {
     let val = job[field];
     if (Array.isArray(val)) {
       if (field === "Tags") {
-        val = val
-          .map((tag) => (typeof tag === "object" ? tag.tag : tag))
-          .join(",");
+        val = val.map((t) => (typeof t === "object" ? t.tag : t)).join(",");
       } else if (field === "Team") {
-        val = val
-          .map((team) => (typeof team === "object" ? team.name : team))
-          .join(",");
+        val = val.map((t) => (typeof t === "object" ? t.name : t)).join(",");
       } else {
         val = JSON.stringify(val);
       }
     }
-    return val !== undefined && val !== null ? String(val) : "";
+    return val != null ? String(val) : "";
   });
 }
 
@@ -200,64 +181,61 @@ async function syncJobsWithSheet(jobs) {
       logger.warn("Job without UUID found, skipping.");
       continue;
     }
-    const formattedRow = formatJobData(job);
+    const rowData = formatJobData(job);
     const rowIndex = findRowIndex(sheetRows, jobUUID);
 
     if (rowIndex !== -1) {
-      await updateSheetRow(rowIndex + 2, formattedRow);
-      sheetRows[rowIndex] = formattedRow;
+      await updateSheetRow(rowIndex + 2, rowData);
+      sheetRows[rowIndex] = rowData;
     } else {
-      await appendSheetRow(formattedRow);
-      sheetRows.push(formattedRow);
+      await appendSheetRow(rowData);
+      sheetRows.push(rowData);
     }
   }
 }
 
-async function handler(req, res) {
+export default async function handler(req, res) {
   if (req.method !== "POST") {
-    res.status(405).json({ error: "Method Not Allowed, use POST" });
-    return;
+    return res.status(405).json({ error: "Method Not Allowed, use POST" });
   }
 
   if (!WORKIZ_API_TOKEN || !SPREADSHEET_ID || !GOOGLE_SERVICE_ACCOUNT_KEY) {
-    res
+    return res
       .status(500)
-      .json({ error: "Missing required environment variables for sync" });
-    return;
+      .json({ error: "Missing environment variables required for sync." });
   }
 
   const { startDate } = req.body;
   let effectiveStartDate = startDate;
 
   if (!startDate || !/^\d{4}-\d{2}-\d{2}$/.test(startDate)) {
-    const today = new Date();
-    const dayBefore = new Date(today);
-    dayBefore.setDate(today.getDate() - 7);
+    const dayBefore = new Date();
+    dayBefore.setDate(dayBefore.getDate() - 7);
     effectiveStartDate = dayBefore.toISOString().split("T")[0];
   }
 
-  logger.info(`API sync trigger received. Start date: ${effectiveStartDate}`);
+  logger.info(`Received sync request with start date: ${effectiveStartDate}`);
 
   try {
     await authenticateGoogleSheets();
     const jobs = await fetchJobs(effectiveStartDate);
-    if (jobs.length > 0) {
-      await syncJobsWithSheet(jobs);
-      logger.info("Sync completed successfully.");
-      res
-        .status(200)
-        .json({
-          message: "Sync completed successfully.",
-          jobsSynced: jobs.length,
-        });
-    } else {
-      logger.info("No jobs retrieved to sync.");
-      res.status(200).json({ message: "No jobs retrieved to sync." });
+
+    if (jobs.length === 0) {
+      logger.info("No jobs to sync.");
+      return res.status(200).json({ message: "No jobs retrieved to sync." });
     }
+
+    await syncJobsWithSheet(jobs);
+
+    logger.info("Sync completed successfully.");
+    res
+      .status(200)
+      .json({
+        message: "Sync completed successfully.",
+        jobsSynced: jobs.length,
+      });
   } catch (error) {
     logger.error(`Sync failed: ${error.message}`);
-    res.status(500).json({ error: "Sync failed: " + error.message });
+    res.status(500).json({ error: `Sync failed: ${error.message}` });
   }
 }
-
-export default handler;
