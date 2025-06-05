@@ -4,50 +4,26 @@ import winston from "winston";
 import fs from "fs";
 import os from "os";
 import path from "path";
-
-const WORKIZ_API_TOKEN = process.env.WORKIZ_API_TOKEN;
-const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
-const SHEET_NAME = process.env.SHEET_NAME || "Sheet1";
-const GOOGLE_SERVICE_ACCOUNT_KEY = process.env.GOOGLE_SERVICE_ACCOUNT_KEY;
-
-const logger = winston.createLogger({
-  level: "info",
-  format: winston.format.combine(
-    winston.format.timestamp({ format: "YYYY-MM-DD HH:mm:ss" }),
-    winston.format.printf(
-      (info) =>
-        `${info.timestamp} [${info.level.toUpperCase()}] ${info.message}`
-    )
-  ),
-  transports: [new winston.transports.Console()],
-});
-
-const sheets = google.sheets("v4");
-
-async function createTempGoogleCredsFile() {
-  const tempFilePath = path.join(
+// Other code...
+async function authenticateGoogleSheets() {
+  const keyFilePath = path.join(
     os.tmpdir(),
     `vercel-google-creds-${Date.now()}.json`
   );
-  await fs.promises.writeFile(tempFilePath, GOOGLE_SERVICE_ACCOUNT_KEY);
-  return tempFilePath;
-}
-
-async function authenticateGoogleSheets() {
-  const keyFilePath = await createTempGoogleCredsFile();
-
+  const encodedKey = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+  // Decode the Base64 string and write it to a temporary file
+  const jsonKey = Buffer.from(encodedKey, "base64").toString("utf-8");
+  await fs.promises.writeFile(keyFilePath, jsonKey);
   const auth = new google.auth.GoogleAuth({
     keyFile: keyFilePath,
     scopes: ["https://www.googleapis.com/auth/spreadsheets"],
   });
   const authClient = await auth.getClient();
   google.options({ auth: authClient });
-
   fs.unlink(keyFilePath, (err) => {
-    if (err) logger.warn(`Failed to delete temp creds file: ${err.message}`);
+    if (err) console.warn(`Failed to delete temp creds file: ${err.message}`);
   });
-
-  logger.info("Authenticated with Google Sheets API.");
+  console.info("Authenticated with Google Sheets API.");
 }
 
 async function fetchJobs(startDate) {
@@ -228,12 +204,10 @@ export default async function handler(req, res) {
     await syncJobsWithSheet(jobs);
 
     logger.info("Sync completed successfully.");
-    res
-      .status(200)
-      .json({
-        message: "Sync completed successfully.",
-        jobsSynced: jobs.length,
-      });
+    res.status(200).json({
+      message: "Sync completed successfully.",
+      jobsSynced: jobs.length,
+    });
   } catch (error) {
     logger.error(`Sync failed: ${error.message}`);
     res.status(500).json({ error: `Sync failed: ${error.message}` });
