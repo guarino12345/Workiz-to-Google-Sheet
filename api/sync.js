@@ -154,10 +154,9 @@ async function updateSheetRow(
 }
 
 async function appendSheetRow(sheets, spreadsheetId, sheetName, values) {
-  const range = `${sheetName}!A:Z`; // Append to the last row
   await sheets.spreadsheets.values.append({
     spreadsheetId,
-    range,
+    range: `${sheetName}!A1:Z1`,
     valueInputOption: "RAW",
     insertDataOption: "INSERT_ROWS",
     requestBody: { values: [values] },
@@ -180,8 +179,10 @@ async function syncJobsWithSheet(sheets, spreadsheetId, sheetName, jobs) {
 
     if (index !== -1) {
       await updateSheetRow(sheets, spreadsheetId, sheetName, index + 2, data);
+      rows[index] = data;
     } else {
       await appendSheetRow(sheets, spreadsheetId, sheetName, data);
+      rows.push(data);
     }
   }
 }
@@ -206,7 +207,7 @@ export default async function handler(req, res) {
     });
   }
 
-  const { startDate } = req.body;
+  const { startDate, endDate } = req.body; // Get end date from request body
   let dateToUse = startDate;
 
   if (!startDate || !/^\d{4}-\d{2}-\d{2}$/.test(startDate)) {
@@ -221,17 +222,35 @@ export default async function handler(req, res) {
     const sheets = await authenticateGoogleSheets(
       GOOGLE_APPLICATION_CREDENTIALS
     );
-    const jobs = await fetchJobs(WORKIZ_API_TOKEN, dateToUse);
+    const jobs = await fetchJobs(WORKIZ_API_TOKEN, dateToUse); // Only use start date
 
     if (!jobs.length) {
       return res.status(200).json({ message: "No jobs found." });
     }
 
-    await syncJobsWithSheet(sheets, SPREADSHEET_ID, SHEET_NAME, jobs);
+    // Filter jobs based on end date if provided
+    const filteredJobs = endDate
+      ? jobs.filter((job) => {
+          const jobDate = new Date(job.JobDateTime); // Parse JobDateTime
+          const start = new Date(startDate + "T00:00:00"); // Ensure startDate is at the beginning of the day
+          const end = new Date(endDate + "T23:59:59"); // Ensure endDate is at the end of the day
+
+          // Log the dates for debugging
+          logger.info(
+            `Filtering job: ${job.UUID}, JobDateTime: ${
+              job.JobDateTime
+            }, Start: ${start.toISOString()}, End: ${end.toISOString()}`
+          );
+
+          return jobDate >= start && jobDate <= end;
+        })
+      : jobs;
+
+    await syncJobsWithSheet(sheets, SPREADSHEET_ID, SHEET_NAME, filteredJobs);
 
     res
       .status(200)
-      .json({ message: "Sync complete.", jobsSynced: jobs.length });
+      .json({ message: "Sync complete.", jobsSynced: filteredJobs.length });
   } catch (err) {
     logger.error(`Sync failed: ${err.message}`);
     res.status(500).json({ error: `Sync failed: ${err.message}` });
