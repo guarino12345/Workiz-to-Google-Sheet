@@ -67,7 +67,7 @@ async function fetchJobs(apiToken, startDate) {
 async function getSheetRows(sheets, spreadsheetId, sheetName) {
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId,
-    range: `${sheetName}!A:Z`,
+    range: `${sheetName}!A2:Z`,
   });
   const rows = res.data.values || [];
   logger.info(`Retrieved ${rows.length} rows from Google Sheet.`);
@@ -154,9 +154,10 @@ async function updateSheetRow(
 }
 
 async function appendSheetRow(sheets, spreadsheetId, sheetName, values) {
+  const range = `${sheetName}!A:Z`; // Append to the last row
   await sheets.spreadsheets.values.append({
     spreadsheetId,
-    range: `${sheetName}!A:Z`,
+    range,
     valueInputOption: "RAW",
     insertDataOption: "INSERT_ROWS",
     requestBody: { values: [values] },
@@ -178,7 +179,7 @@ async function syncJobsWithSheet(sheets, spreadsheetId, sheetName, jobs) {
     const index = findRowIndex(rows, uuid);
 
     if (index !== -1) {
-      await updateSheetRow(sheets, spreadsheetId, sheetName, index + 1, data);
+      await updateSheetRow(sheets, spreadsheetId, sheetName, index + 2, data);
     } else {
       await appendSheetRow(sheets, spreadsheetId, sheetName, data);
     }
