@@ -67,7 +67,7 @@ async function fetchJobs(apiToken, startDate) {
 async function getSheetRows(sheets, spreadsheetId, sheetName) {
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId,
-    range: `${sheetName}!A2:Z`,
+    range: `${sheetName}!A:Z`,
   });
   const rows = res.data.values || [];
   logger.info(`Retrieved ${rows.length} rows from Google Sheet.`);
@@ -156,7 +156,7 @@ async function updateSheetRow(
 async function appendSheetRow(sheets, spreadsheetId, sheetName, values) {
   await sheets.spreadsheets.values.append({
     spreadsheetId,
-    range: `${sheetName}!A1:Z1`,
+    range: `${sheetName}!A:Z`,
     valueInputOption: "RAW",
     insertDataOption: "INSERT_ROWS",
     requestBody: { values: [values] },
@@ -178,11 +178,9 @@ async function syncJobsWithSheet(sheets, spreadsheetId, sheetName, jobs) {
     const index = findRowIndex(rows, uuid);
 
     if (index !== -1) {
-      await updateSheetRow(sheets, spreadsheetId, sheetName, index + 2, data);
-      rows[index] = data;
+      await updateSheetRow(sheets, spreadsheetId, sheetName, index + 1, data);
     } else {
       await appendSheetRow(sheets, spreadsheetId, sheetName, data);
-      rows.push(data);
     }
   }
 }
@@ -207,7 +205,7 @@ export default async function handler(req, res) {
     });
   }
 
-  const { startDate, endDate } = req.body; // Get end date from request body
+  const { startDate } = req.body;
   let dateToUse = startDate;
 
   if (!startDate || !/^\d{4}-\d{2}-\d{2}$/.test(startDate)) {
@@ -222,26 +220,17 @@ export default async function handler(req, res) {
     const sheets = await authenticateGoogleSheets(
       GOOGLE_APPLICATION_CREDENTIALS
     );
-    const jobs = await fetchJobs(WORKIZ_API_TOKEN, dateToUse); // Only use start date
+    const jobs = await fetchJobs(WORKIZ_API_TOKEN, dateToUse);
 
     if (!jobs.length) {
       return res.status(200).json({ message: "No jobs found." });
     }
 
-    // Filter jobs based on end date if provided
-    const filteredJobs = endDate
-      ? jobs.filter((job) => {
-          const jobDate = new Date(job.JobDateTime);
-          const end = new Date(endDate);
-          return jobDate >= new Date(startDate) && jobDate <= end;
-        })
-      : jobs;
-
-    await syncJobsWithSheet(sheets, SPREADSHEET_ID, SHEET_NAME, filteredJobs);
+    await syncJobsWithSheet(sheets, SPREADSHEET_ID, SHEET_NAME, jobs);
 
     res
       .status(200)
-      .json({ message: "Sync complete.", jobsSynced: filteredJobs.length });
+      .json({ message: "Sync complete.", jobsSynced: jobs.length });
   } catch (err) {
     logger.error(`Sync failed: ${err.message}`);
     res.status(500).json({ error: `Sync failed: ${err.message}` });
