@@ -42,16 +42,17 @@ async function authenticateGoogleSheets(encodedKey) {
 }
 
 // Fetch job list from Workiz API
-async function fetchJobs(apiToken, startDate) {
+async function fetchJobs(apiToken, startDate, endDate) {
   const url = `https://api.workiz.com/api/v1/${apiToken}/job/all/`;
   const params = {
     start_date: startDate,
+    end_date: endDate, // Add end date to parameters
     offset: 0,
     records: 100,
     only_open: false,
   };
 
-  logger.info(`Fetching jobs from ${startDate}`);
+  logger.info(`Fetching jobs from ${startDate} to ${endDate}`);
   try {
     const response = await axios.get(url, { params, timeout: 15000 });
     return response.data.data || [];
@@ -207,7 +208,7 @@ export default async function handler(req, res) {
     });
   }
 
-  const { startDate } = req.body;
+  const { startDate, endDate } = req.body; // Get end date from request body
   let dateToUse = startDate;
 
   if (!startDate || !/^\d{4}-\d{2}-\d{2}$/.test(startDate)) {
@@ -222,7 +223,7 @@ export default async function handler(req, res) {
     const sheets = await authenticateGoogleSheets(
       GOOGLE_APPLICATION_CREDENTIALS
     );
-    const jobs = await fetchJobs(WORKIZ_API_TOKEN, dateToUse);
+    const jobs = await fetchJobs(WORKIZ_API_TOKEN, dateToUse, endDate); // Pass end date
 
     if (!jobs.length) {
       return res.status(200).json({ message: "No jobs found." });

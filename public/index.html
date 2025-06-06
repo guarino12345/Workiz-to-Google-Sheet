@@ -131,6 +131,8 @@
           required
           aria-required="true"
         />
+        <label for="end-date">Select End Date (Optional)</label>
+        <input type="date" id="end-date" name="end-date" />
         <button type="submit" id="sync-button">Start Sync</button>
       </form>
       <div class="progress-container" aria-hidden="true">
@@ -150,17 +152,21 @@
       const statusText = document.getElementById("status-text");
       const syncButton = document.getElementById("sync-button");
       const startDateInput = document.getElementById("start-date");
+      const endDateInput = document.getElementById("end-date");
 
       form.addEventListener("submit", async (event) => {
         event.preventDefault();
 
         const startDate = startDateInput.value;
+        const endDate = endDateInput.value; // Get the end date
+
         if (!startDate) {
           alert("Please select a start date.");
           return;
         }
 
         startDateInput.disabled = true;
+        endDateInput.disabled = true; // Disable end date input
         syncButton.disabled = true;
         progressBar.style.width = "0%";
         progressBar.textContent = "0%";
@@ -181,7 +187,7 @@
           const response = await fetch("/api/sync", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ startDate }),
+            body: JSON.stringify({ startDate, endDate }), // Include end date
           });
 
           clearInterval(progressInterval);
@@ -209,6 +215,7 @@
         } finally {
           syncButton.disabled = false;
           startDateInput.disabled = false;
+          endDateInput.disabled = false; // Re-enable end date input
         }
       });
     </script>
