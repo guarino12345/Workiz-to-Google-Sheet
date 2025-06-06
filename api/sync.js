@@ -136,36 +136,25 @@ function formatJobData(job) {
   });
 }
 
-async function updateSheetRow(
-  sheets,
-  spreadsheetId,
-  sheetName,
-  rowNumber,
-  values
-) {
-  const range = `${sheetName}!A${rowNumber}:Z${rowNumber}`;
-  await sheets.spreadsheets.values.update({
-    spreadsheetId,
-    range,
-    valueInputOption: "RAW",
-    requestBody: { values: [values] },
-  });
-  logger.info(`Updated row #${rowNumber} for job ${values[0]}`);
-}
-
-async function appendSheetRow(sheets, spreadsheetId, sheetName, values) {
-  await sheets.spreadsheets.values.append({
-    spreadsheetId,
-    range: `${sheetName}!A1:Z1`,
-    valueInputOption: "RAW",
-    insertDataOption: "INSERT_ROWS",
-    requestBody: { values: [values] },
-  });
-  logger.info(`Appended new row for job ${values[0]}`);
-}
-
-async function syncJobsWithSheet(sheets, spreadsheetId, sheetName, jobs) {
+/**
+ * Batch update or append all job rows at once to avoid quota exceeded error.
+ * This function accumulates all rows to update and append, then sends them
+ * in the minimal number of requests with correct ranges.
+ */
+async function batchSyncJobsWithSheet(sheets, spreadsheetId, sheetName, jobs) {
   const rows = await getSheetRows(sheets, spreadsheetId, sheetName);
+
+  // Map existing job UUID to row index starting at 0 for rows array (corresponds to sheet row number = index+2)
+  const uuidToRowIndex = new Map();
+  rows.forEach((row, idx) => {
+    if (row[0]) {
+      uuidToRowIndex.set(row[0], idx);
+    }
+  });
+
+  // Prepare data for batch update and append
+  const updates = []; // { range: string, values: [[...]] }
+  const appends = [];
 
   for (const job of jobs) {
     const uuid = job.UUID;
@@ -173,18 +162,104 @@ async function syncJobsWithSheet(sheets, spreadsheetId, sheetName, jobs) {
       logger.warn("Skipping job with missing UUID");
       continue;
     }
-
     const data = formatJobData(job);
-    const index = findRowIndex(rows, uuid);
+    const existingIndex = uuidToRowIndex.get(uuid);
 
-    if (index !== -1) {
-      await updateSheetRow(sheets, spreadsheetId, sheetName, index + 2, data);
-      rows[index] = data;
+    if (existingIndex !== undefined) {
+      // Update existing row at (existingIndex + 2)
+      updates.push({
+        range: `${sheetName}!A${existingIndex + 2}:Z${existingIndex + 2}`,
+        values: [data],
+      });
+      // Also update rows array to keep consistent if needed later
+      rows[existingIndex] = data;
     } else {
-      await appendSheetRow(sheets, spreadsheetId, sheetName, data);
-      rows.push(data);
+      // Append new row
+      appends.push(data);
     }
   }
+
+  // Batch update existing rows if any
+  if (updates.length > 0) {
+    logger.info(`Batch updating ${updates.length} existing rows...`);
+    await batchUpdateRows(sheets, spreadsheetId, updates);
+  }
+
+  // Append new rows if any using a single append call
+  if (appends.length > 0) {
+    logger.info(`Appending ${appends.length} new rows...`);
+    await batchAppendRows(sheets, spreadsheetId, sheetName, appends);
+  }
+}
+
+/**
+ * Batch update multiple rows in one API call using spreadsheets.values.batchUpdate
+ */
+async function batchUpdateRows(sheets, spreadsheetId, updates) {
+  const data = updates.map((u) => ({
+    range: u.range,
+    values: u.values,
+  }));
+
+  try {
+    await sheets.spreadsheets.values.batchUpdate({
+      spreadsheetId,
+      requestBody: {
+        valueInputOption: "RAW",
+        data,
+      },
+    });
+    logger.info(`Batch update successful for ${updates.length} rows.`);
+  } catch (error) {
+    // Handle quota exceeded or other errors with exponential backoff
+    logger.error(`Batch update error: ${error.message}`);
+    await handleQuotaBackoff(error, () =>
+      batchUpdateRows(sheets, spreadsheetId, updates)
+    );
+  }
+}
+
+/**
+ * Append multiple rows in one API call using spreadsheets.values.append
+ */
+async function batchAppendRows(sheets, spreadsheetId, sheetName, rows) {
+  try {
+    await sheets.spreadsheets.values.append({
+      spreadsheetId,
+      range: `${sheetName}!A1:Z1`,
+      valueInputOption: "RAW",
+      insertDataOption: "INSERT_ROWS",
+      requestBody: { values: rows },
+    });
+    logger.info(`Batch append successful for ${rows.length} rows.`);
+  } catch (error) {
+    logger.error(`Batch append error: ${error.message}`);
+    await handleQuotaBackoff(error, () =>
+      batchAppendRows(sheets, spreadsheetId, sheetName, rows)
+    );
+  }
+}
+
+/**
+ * Exponential backoff handler for quota exceeded or retryable errors
+ */
+async function handleQuotaBackoff(error, retryFunction, retries = 0) {
+  const maxRetries = 5;
+  const isQuotaError =
+    error.code === 429 || // Too many requests
+    (error.errors &&
+      error.errors.some((e) => e.reason === "userRateLimitExceeded"));
+
+  if (isQuotaError && retries < maxRetries) {
+    const delay = Math.min(1000 * 2 ** retries, 30000);
+    logger.warn(
+      `Quota exceeded, retrying after ${delay} ms (attempt ${retries + 1})`
+    );
+    await new Promise((resolve) => setTimeout(resolve, delay));
+    return retryFunction(retries + 1);
+  }
+  // If maximum retries exceeded or error is not quota related, throw error
+  throw error;
 }
 
 // MAIN HANDLER
@@ -207,7 +282,7 @@ export default async function handler(req, res) {
     });
   }
 
-  const { startDate, endDate } = req.body; // Get end date from request body
+  const { startDate, endDate } = req.body; // Get dates from request body
   let dateToUse = startDate;
 
   if (!startDate || !/^\d{4}-\d{2}-\d{2}$/.test(startDate)) {
@@ -222,31 +297,31 @@ export default async function handler(req, res) {
     const sheets = await authenticateGoogleSheets(
       GOOGLE_APPLICATION_CREDENTIALS
     );
-    const jobs = await fetchJobs(WORKIZ_API_TOKEN, dateToUse); // Only use start date
+    const jobs = await fetchJobs(WORKIZ_API_TOKEN, dateToUse);
 
     if (!jobs.length) {
       return res.status(200).json({ message: "No jobs found." });
     }
 
-    // Filter jobs based on end date if provided
+    // Filter jobs by JobDateTime range if endDate provided
     const filteredJobs = endDate
       ? jobs.filter((job) => {
-          const jobDate = new Date(job.JobDateTime); // Parse JobDateTime
-          const start = new Date(startDate + "T00:00:00"); // Ensure startDate is at the beginning of the day
-          const end = new Date(endDate + "T23:59:59"); // Ensure endDate is at the end of the day
-
-          // Log the dates for debugging
+          const jobDate = new Date(job.JobDateTime);
+          const start = new Date(startDate + "T00:00:00");
+          const end = new Date(endDate + "T23:59:59");
           logger.info(
-            `Filtering job: ${job.UUID}, JobDateTime: ${
-              job.JobDateTime
-            }, Start: ${start.toISOString()}, End: ${end.toISOString()}`
+            `Filtering job: ${job.UUID}, JobDateTime: ${job.JobDateTime}`
           );
-
           return jobDate >= start && jobDate <= end;
         })
       : jobs;
 
-    await syncJobsWithSheet(sheets, SPREADSHEET_ID, SHEET_NAME, filteredJobs);
+    await batchSyncJobsWithSheet(
+      sheets,
+      SPREADSHEET_ID,
+      SHEET_NAME,
+      filteredJobs
+    );
 
     res
       .status(200)
