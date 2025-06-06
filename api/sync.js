@@ -42,17 +42,16 @@ async function authenticateGoogleSheets(encodedKey) {
 }
 
 // Fetch job list from Workiz API
-async function fetchJobs(apiToken, startDate, endDate) {
+async function fetchJobs(apiToken, startDate) {
   const url = `https://api.workiz.com/api/v1/${apiToken}/job/all/`;
   const params = {
     start_date: startDate,
-    end_date: endDate, // Add end date to parameters
     offset: 0,
     records: 100,
     only_open: false,
   };
 
-  logger.info(`Fetching jobs from ${startDate} to ${endDate}`);
+  logger.info(`Fetching jobs from ${startDate}`);
   try {
     const response = await axios.get(url, { params, timeout: 15000 });
     return response.data.data || [];
@@ -223,17 +222,26 @@ export default async function handler(req, res) {
     const sheets = await authenticateGoogleSheets(
       GOOGLE_APPLICATION_CREDENTIALS
     );
-    const jobs = await fetchJobs(WORKIZ_API_TOKEN, dateToUse, endDate); // Pass end date
+    const jobs = await fetchJobs(WORKIZ_API_TOKEN, dateToUse); // Only use start date
 
     if (!jobs.length) {
       return res.status(200).json({ message: "No jobs found." });
     }
 
-    await syncJobsWithSheet(sheets, SPREADSHEET_ID, SHEET_NAME, jobs);
+    // Filter jobs based on end date if provided
+    const filteredJobs = endDate
+      ? jobs.filter((job) => {
+          const jobDate = new Date(job.JobDateTime);
+          const end = new Date(endDate);
+          return jobDate >= new Date(startDate) && jobDate <= end;
+        })
+      : jobs;
+
+    await syncJobsWithSheet(sheets, SPREADSHEET_ID, SHEET_NAME, filteredJobs);
 
     res
       .status(200)
-      .json({ message: "Sync complete.", jobsSynced: jobs.length });
+      .json({ message: "Sync complete.", jobsSynced: filteredJobs.length });
   } catch (err) {
     logger.error(`Sync failed: ${err.message}`);
     res.status(500).json({ error: `Sync failed: ${err.message}` });
