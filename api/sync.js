@@ -168,14 +168,14 @@ async function batchSyncJobsWithSheet(sheets, spreadsheetId, sheetName, jobs) {
     if (existingIndex !== undefined) {
       // Update existing row at (existingIndex + 2)
       updates.push({
-        range: `${sheetName}!A${existingIndex + 2}:Z${existingIndex + 2}`,
-        values: [data],
+        range: `${sheetName}!A${existingIndex + 2}:AM${existingIndex + 2}`, // Adjusted to accommodate 39 columns (A to AM)
+        values: [data], // Send all columns
       });
       // Also update rows array to keep consistent if needed later
       rows[existingIndex] = data;
     } else {
       // Append new row
-      appends.push(data);
+      appends.push(data); // Send all columns
     }
   }
 
