@@ -12,7 +12,7 @@ const logger = winston.createLogger({
     winston.format.timestamp({ format: "YYYY-MM-DD HH:mm:ss" }),
     winston.format.printf(
       (info) =>
-        `${info.timestamp} [${info.level.toUpperCase()}] ${info.message}`
+        info.timestamp + " [" + info.level.toUpperCase() + "] " + info.message
     )
   ),
   transports: [new winston.transports.Console()],
@@ -34,7 +34,7 @@ async function authenticateGoogleSheets(encodedKey) {
 
   // Clean up the temp file asynchronously (don’t block)
   fs.unlink(tempFilePath).catch((err) =>
-    logger.warn(`Failed to delete temp creds file: ${err.message}`)
+    logger.warn("Failed to delete temp creds file: " + err.message)
   );
 
   logger.info("Authenticated with Google Sheets API.");
@@ -51,7 +51,7 @@ async function fetchJobs(apiToken, startDate, jobSources) {
     only_open: false,
   };
 
-  logger.info(`Fetching jobs from ${startDate}`);
+  logger.info("Fetching jobs from " + startDate);
   try {
     const response = await axios.get(url, { params, timeout: 15000 });
     let jobs = response.data.data || [];
@@ -69,7 +69,7 @@ async function fetchJobs(apiToken, startDate, jobSources) {
     const msg = error.response
       ? JSON.stringify(error.response.data)
       : error.message;
-    logger.error(`Workiz API error: ${msg}`);
+    logger.error("Workiz API error: " + msg);
     throw error;
   }
 }
@@ -80,7 +80,7 @@ async function getSheetRows(sheets, spreadsheetId, sheetName) {
     range: `${sheetName}!A2:AM`, // columns A to AM = 39 columns
   });
   const rows = res.data.values || [];
-  logger.info(`Retrieved ${rows.length} rows from Google Sheet.`);
+  logger.info("Retrieved " + rows.length + " rows from Google Sheet.");
   return rows;
 }
 
@@ -182,12 +182,12 @@ async function batchSyncJobsWithSheet(sheets, spreadsheetId, sheetName, jobs) {
   }
 
   if (updates.length > 0) {
-    logger.info(`Batch updating ${updates.length} rows...`);
+    logger.info("Batch updating " + updates.length + " rows...");
     await batchUpdateRows(sheets, spreadsheetId, updates);
   }
 
   if (appends.length > 0) {
-    logger.info(`Appending ${appends.length} new rows...`);
+    logger.info("Appending " + appends.length + " new rows...");
     await batchAppendRows(sheets, spreadsheetId, sheetName, appends);
   }
 }
@@ -206,9 +206,9 @@ async function batchUpdateRows(sheets, spreadsheetId, updates) {
         data,
       },
     });
-    logger.info(`Batch update successful for ${updates.length} rows.`);
+    logger.info("Batch update successful for " + updates.length + " rows.");
   } catch (error) {
-    logger.error(`Batch update error: ${error.message}`);
+    logger.error("Batch update error: " + error.message);
     await handleQuotaBackoff(error, () =>
       batchUpdateRows(sheets, spreadsheetId, updates)
     );
@@ -224,9 +224,9 @@ async function batchAppendRows(sheets, spreadsheetId, sheetName, rows) {
       insertDataOption: "INSERT_ROWS",
       requestBody: { values: rows },
     });
-    logger.info(`Batch append successful for ${rows.length} rows.`);
+    logger.info("Batch append successful for " + rows.length + " rows.");
   } catch (error) {
-    logger.error(`Batch append error: ${error.message}`);
+    logger.error("Batch append error: " + error.message);
     await handleQuotaBackoff(error, () =>
       batchAppendRows(sheets, spreadsheetId, sheetName, rows)
     );
@@ -243,12 +243,96 @@ async function handleQuotaBackoff(error, retryFunction, retries = 0) {
   if (isQuotaError && retries < maxRetries) {
     const delay = Math.min(1000 * 2 ** retries, 30000);
     logger.warn(
-      `Quota exceeded, retrying after ${delay} ms (attempt ${retries + 1})`
+      "Quota exceeded, retrying after " +
+        delay +
+        " ms (attempt " +
+        (retries + 1) +
+        ")"
     );
     await new Promise((resolve) => setTimeout(resolve, delay));
     return retryFunction(retries + 1);
   }
   throw error;
+}
+
+// New function to fetch detailed job info for each UUID in the sheet and update rows accordingly
+async function fetchAndUpdateDetailedJobs(
+  sheets,
+  spreadsheetId,
+  sheetName,
+  apiToken
+) {
+  // 1. Get all existing rows and UUIDs
+  const rows = await getSheetRows(sheets, spreadsheetId, sheetName);
+  // Map UUID => row index (0-based)
+  const uuidToRowIndex = new Map();
+  rows.forEach((row, idx) => {
+    if (row[0]) {
+      uuidToRowIndex.set(row[0], idx);
+    }
+  });
+
+  const concurrencyLimit = 5; // Limit concurrent requests to avoid rate limiting
+  const uuids = Array.from(uuidToRowIndex.keys());
+  const updates = [];
+
+  // A utility to process promises with concurrency limit
+  async function processInBatches(items, batchSize, processor) {
+    let index = 0;
+    const results = [];
+    async function next() {
+      if (index >= items.length) return;
+      const currentIndex = index++;
+      try {
+        results[currentIndex] = await processor(
+          items[currentIndex],
+          currentIndex
+        );
+      } catch (err) {
+        results[currentIndex] = null;
+        logger.error(err.message || err);
+      }
+      await next();
+    }
+    const workers = [];
+    for (let i = 0; i < batchSize; i++) {
+      workers.push(next());
+    }
+    await Promise.all(workers);
+    return results;
+  }
+
+  await processInBatches(uuids, concurrencyLimit, async (uuid) => {
+    try {
+      const detailUrl =
+        "https://api.workiz.com/api/v1/" + apiToken + "/job/get/" + uuid + "/";
+      const response = await axios.get(detailUrl, { timeout: 15000 });
+      const detailedJob = response.data.data;
+
+      if (!detailedJob) {
+        logger.warn("No details found for job UUID " + uuid);
+        return;
+      }
+
+      const detailedData = formatJobData(detailedJob);
+      const rowIndex = uuidToRowIndex.get(uuid);
+      updates.push({
+        range: sheetName + "!A" + (rowIndex + 2) + ":AM" + (rowIndex + 2),
+        values: [detailedData],
+      });
+    } catch (err) {
+      logger.error(
+        "Failed to fetch details for UUID " + uuid + ": " + err.message
+      );
+    }
+  });
+
+  if (updates.length > 0) {
+    logger.info("Batch updating " + updates.length + " detailed job rows...");
+    await batchUpdateRows(sheets, spreadsheetId, updates);
+  } else {
+    logger.info("No detailed job rows to update.");
+  }
 }
 
 // Main handler
@@ -280,7 +364,7 @@ export default async function handler(req, res) {
     dateToUse = fallback.toISOString().split("T")[0];
   }
 
-  logger.info(`Received sync request starting from ${dateToUse}`);
+  logger.info("Received sync request starting from " + dateToUse);
 
   try {
     const sheets = await authenticateGoogleSheets(
@@ -299,7 +383,7 @@ export default async function handler(req, res) {
           const start = new Date(startDate + "T00:00:00");
           const end = new Date(endDate + "T23:59:59");
           logger.info(
-            `Filtering job: ${job.UUID}, JobDateTime: ${job.JobDateTime}`
+            "Filtering job: " + job.UUID + ", JobDateTime: " + job.JobDateTime
           );
           return jobDate >= start && jobDate <= end;
         })
@@ -312,11 +396,20 @@ export default async function handler(req, res) {
       filteredJobs
     );
 
-    res
-      .status(200)
-      .json({ message: "Sync complete.", jobsSynced: filteredJobs.length });
+    // After initial sync, fetch detailed job info and update corresponding rows
+    await fetchAndUpdateDetailedJobs(
+      sheets,
+      SPREADSHEET_ID,
+      SHEET_NAME,
+      WORKIZ_API_TOKEN
+    );
+
+    res.status(200).json({
+      message: "Sync complete including detailed updates.",
+      jobsSynced: filteredJobs.length,
+    });
   } catch (err) {
-    logger.error(`Sync failed: ${err.message}`);
-    res.status(500).json({ error: `Sync failed: ${err.message}` });
+    logger.error("Sync failed: " + err.message);
+    res.status(500).json({ error: "Sync failed: " + err.message });
   }
 }
