@@ -56,7 +56,7 @@ async function fetchJobs(apiToken, startDate, jobSources) {
     const response = await axios.get(url, { params, timeout: 15000 });
     let jobs = response.data.data || [];
 
-    // Filter by jobSources if provided
+    // Filter by jobSources if provided (case-insensitive)
     if (Array.isArray(jobSources) && jobSources.length > 0) {
       const jobSourcesSet = new Set(jobSources.map((s) => s.toLowerCase()));
       jobs = jobs.filter(
@@ -151,10 +151,10 @@ async function batchSyncJobsWithSheet(sheets, spreadsheetId, sheetName, jobs) {
   // Map job UUID -> row index (0-based)
   const uuidToRowIndex = new Map();
   rows.forEach((row, idx) => {
-    if (row[0]) {
-      uuidToRowIndex.set(row[0], idx);
-    }
+    if (row[0]) uuidToRowIndex.set(row[0], idx);
   });
+
+  logger.info("Existing rows UUID count: " + uuidToRowIndex.size);
 
   const updates = [];
   const appends = [];
@@ -175,7 +175,6 @@ async function batchSyncJobsWithSheet(sheets, spreadsheetId, sheetName, jobs) {
         range: `${sheetName}!A${existingIndex + 2}:AM${existingIndex + 2}`,
         values: [data],
       });
-      rows[existingIndex] = data;
     } else {
       appends.push(data);
     }
@@ -188,6 +187,7 @@ async function batchSyncJobsWithSheet(sheets, spreadsheetId, sheetName, jobs) {
 
   if (appends.length > 0) {
     logger.info("Appending " + appends.length + " new rows...");
+    // IMPORTANT: Use just sheetName in append range to append at bottom without overwriting
     await batchAppendRows(sheets, spreadsheetId, sheetName, appends);
   }
 }
@@ -219,7 +219,7 @@ async function batchAppendRows(sheets, spreadsheetId, sheetName, rows) {
   try {
     await sheets.spreadsheets.values.append({
       spreadsheetId,
-      range: `${sheetName}!A1:AM1`,
+      range: sheetName, // Append at the bottom safely
       valueInputOption: "RAW",
       insertDataOption: "INSERT_ROWS",
       requestBody: { values: rows },
@@ -262,9 +262,7 @@ async function fetchAndUpdateDetailedJobs(
   sheetName,
   apiToken
 ) {
-  // 1. Get all existing rows and UUIDs
   const rows = await getSheetRows(sheets, spreadsheetId, sheetName);
-  // Map UUID => row index (0-based)
   const uuidToRowIndex = new Map();
   rows.forEach((row, idx) => {
     if (row[0]) {
@@ -272,11 +270,10 @@ async function fetchAndUpdateDetailedJobs(
     }
   });
 
-  const concurrencyLimit = 5; // Limit concurrent requests to avoid rate limiting
+  const concurrencyLimit = 5;
   const uuids = Array.from(uuidToRowIndex.keys());
   const updates = [];
 
-  // A utility to process promises with concurrency limit
   async function processInBatches(items, batchSize, processor) {
     let index = 0;
     const results = [];
@@ -404,10 +401,12 @@ export default async function handler(req, res) {
       WORKIZ_API_TOKEN
     );
 
-    res.status(200).json({
-      message: "Sync complete including detailed updates.",
-      jobsSynced: filteredJobs.length,
-    });
+    res
+      .status(200)
+      .json({
+        message: "Sync complete including detailed updates.",
+        jobsSynced: filteredJobs.length,
+      });
   } catch (err) {
     logger.error("Sync failed: " + err.message);
     res.status(500).json({ error: "Sync failed: " + err.message });
