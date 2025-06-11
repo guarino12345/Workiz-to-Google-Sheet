@@ -187,7 +187,7 @@ async function batchSyncJobsWithSheet(sheets, spreadsheetId, sheetName, jobs) {
 
   if (appends.length > 0) {
     logger.info("Appending " + appends.length + " new rows...");
-    // IMPORTANT: Use just sheetName in append range to append at bottom without overwriting
+    // Append at bottom safely without using insertDataOption which causes row shift
     await batchAppendRows(sheets, spreadsheetId, sheetName, appends);
   }
 }
@@ -219,9 +219,9 @@ async function batchAppendRows(sheets, spreadsheetId, sheetName, rows) {
   try {
     await sheets.spreadsheets.values.append({
       spreadsheetId,
-      range: sheetName, // Append at the bottom safely
+      range: sheetName, // Append at bottom safely to sheet root
       valueInputOption: "RAW",
-      insertDataOption: "INSERT_ROWS",
+      // no insertDataOption here to avoid shifting rows
       requestBody: { values: rows },
     });
     logger.info("Batch append successful for " + rows.length + " rows.");
@@ -255,7 +255,6 @@ async function handleQuotaBackoff(error, retryFunction, retries = 0) {
   throw error;
 }
 
-// New function to fetch detailed job info for each UUID in the sheet and update rows accordingly
 async function fetchAndUpdateDetailedJobs(
   sheets,
   spreadsheetId,
@@ -265,9 +264,7 @@ async function fetchAndUpdateDetailedJobs(
   const rows = await getSheetRows(sheets, spreadsheetId, sheetName);
   const uuidToRowIndex = new Map();
   rows.forEach((row, idx) => {
-    if (row[0]) {
-      uuidToRowIndex.set(row[0], idx);
-    }
+    if (row[0]) uuidToRowIndex.set(row[0], idx);
   });
 
   const concurrencyLimit = 5;
@@ -276,17 +273,12 @@ async function fetchAndUpdateDetailedJobs(
 
   async function processInBatches(items, batchSize, processor) {
     let index = 0;
-    const results = [];
     async function next() {
       if (index >= items.length) return;
       const currentIndex = index++;
       try {
-        results[currentIndex] = await processor(
-          items[currentIndex],
-          currentIndex
-        );
+        await processor(items[currentIndex], currentIndex);
       } catch (err) {
-        results[currentIndex] = null;
         logger.error(err.message || err);
       }
       await next();
@@ -296,7 +288,6 @@ async function fetchAndUpdateDetailedJobs(
       workers.push(next());
     }
     await Promise.all(workers);
-    return results;
   }
 
   await processInBatches(uuids, concurrencyLimit, async (uuid) => {
