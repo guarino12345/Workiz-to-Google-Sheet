@@ -41,8 +41,8 @@ async function authenticateGoogleSheets(encodedKey) {
   return google.sheets("v4");
 }
 
-// Fetch job list from Workiz API
-async function fetchJobs(apiToken, startDate) {
+// Fetch job list from Workiz API, filtering by jobSources if provided
+async function fetchJobs(apiToken, startDate, jobSources) {
   const url = `https://api.workiz.com/api/v1/${apiToken}/job/all/`;
   const params = {
     start_date: startDate,
@@ -54,7 +54,17 @@ async function fetchJobs(apiToken, startDate) {
   logger.info(`Fetching jobs from ${startDate}`);
   try {
     const response = await axios.get(url, { params, timeout: 15000 });
-    return response.data.data || [];
+    let jobs = response.data.data || [];
+
+    // Filter by jobSources if provided
+    if (Array.isArray(jobSources) && jobSources.length > 0) {
+      const jobSourcesSet = new Set(jobSources.map((s) => s.toLowerCase()));
+      jobs = jobs.filter(
+        (job) => job.JobSource && jobSourcesSet.has(job.JobSource.toLowerCase())
+      );
+    }
+
+    return jobs;
   } catch (error) {
     const msg = error.response
       ? JSON.stringify(error.response.data)
@@ -67,15 +77,11 @@ async function fetchJobs(apiToken, startDate) {
 async function getSheetRows(sheets, spreadsheetId, sheetName) {
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId,
-    range: `${sheetName}!A2:Z`,
+    range: `${sheetName}!A2:AM`, // columns A to AM = 39 columns
   });
   const rows = res.data.values || [];
   logger.info(`Retrieved ${rows.length} rows from Google Sheet.`);
   return rows;
-}
-
-function findRowIndex(rows, jobUUID) {
-  return rows.findIndex((row) => row[0] === jobUUID);
 }
 
 function formatJobData(job) {
@@ -138,13 +144,11 @@ function formatJobData(job) {
 
 /**
  * Batch update or append all job rows at once to avoid quota exceeded error.
- * This function accumulates all rows to update and append, then sends them
- * in the minimal number of requests with correct ranges.
  */
 async function batchSyncJobsWithSheet(sheets, spreadsheetId, sheetName, jobs) {
   const rows = await getSheetRows(sheets, spreadsheetId, sheetName);
 
-  // Map existing job UUID to row index starting at 0 for rows array (corresponds to sheet row number = index+2)
+  // Map job UUID -> row index (0-based)
   const uuidToRowIndex = new Map();
   rows.forEach((row, idx) => {
     if (row[0]) {
@@ -152,8 +156,7 @@ async function batchSyncJobsWithSheet(sheets, spreadsheetId, sheetName, jobs) {
     }
   });
 
-  // Prepare data for batch update and append
-  const updates = []; // { range: string, values: [[...]] }
+  const updates = [];
   const appends = [];
 
   for (const job of jobs) {
@@ -162,39 +165,33 @@ async function batchSyncJobsWithSheet(sheets, spreadsheetId, sheetName, jobs) {
       logger.warn("Skipping job with missing UUID");
       continue;
     }
+
     const data = formatJobData(job);
     const existingIndex = uuidToRowIndex.get(uuid);
 
     if (existingIndex !== undefined) {
-      // Update existing row at (existingIndex + 2)
+      // Update existing row (row number = index+2)
       updates.push({
-        range: `${sheetName}!A${existingIndex + 2}:AM${existingIndex + 2}`, // Adjusted to accommodate 39 columns (A to AM)
-        values: [data], // Send all columns
+        range: `${sheetName}!A${existingIndex + 2}:AM${existingIndex + 2}`,
+        values: [data],
       });
-      // Also update rows array to keep consistent if needed later
       rows[existingIndex] = data;
     } else {
-      // Append new row
-      appends.push(data); // Send all columns
+      appends.push(data);
     }
   }
 
-  // Batch update existing rows if any
   if (updates.length > 0) {
-    logger.info(`Batch updating ${updates.length} existing rows...`);
+    logger.info(`Batch updating ${updates.length} rows...`);
     await batchUpdateRows(sheets, spreadsheetId, updates);
   }
 
-  // Append new rows if any using a single append call
   if (appends.length > 0) {
     logger.info(`Appending ${appends.length} new rows...`);
     await batchAppendRows(sheets, spreadsheetId, sheetName, appends);
   }
 }
 
-/**
- * Batch update multiple rows in one API call using spreadsheets.values.batchUpdate
- */
 async function batchUpdateRows(sheets, spreadsheetId, updates) {
   const data = updates.map((u) => ({
     range: u.range,
@@ -211,7 +208,6 @@ async function batchUpdateRows(sheets, spreadsheetId, updates) {
     });
     logger.info(`Batch update successful for ${updates.length} rows.`);
   } catch (error) {
-    // Handle quota exceeded or other errors with exponential backoff
     logger.error(`Batch update error: ${error.message}`);
     await handleQuotaBackoff(error, () =>
       batchUpdateRows(sheets, spreadsheetId, updates)
@@ -219,14 +215,11 @@ async function batchUpdateRows(sheets, spreadsheetId, updates) {
   }
 }
 
-/**
- * Append multiple rows in one API call using spreadsheets.values.append
- */
 async function batchAppendRows(sheets, spreadsheetId, sheetName, rows) {
   try {
     await sheets.spreadsheets.values.append({
       spreadsheetId,
-      range: `${sheetName}!A1:Z1`,
+      range: `${sheetName}!A1:AM1`,
       valueInputOption: "RAW",
       insertDataOption: "INSERT_ROWS",
       requestBody: { values: rows },
@@ -240,13 +233,10 @@ async function batchAppendRows(sheets, spreadsheetId, sheetName, rows) {
   }
 }
 
-/**
- * Exponential backoff handler for quota exceeded or retryable errors
- */
 async function handleQuotaBackoff(error, retryFunction, retries = 0) {
   const maxRetries = 5;
   const isQuotaError =
-    error.code === 429 || // Too many requests
+    error.code === 429 ||
     (error.errors &&
       error.errors.some((e) => e.reason === "userRateLimitExceeded"));
 
@@ -258,11 +248,10 @@ async function handleQuotaBackoff(error, retryFunction, retries = 0) {
     await new Promise((resolve) => setTimeout(resolve, delay));
     return retryFunction(retries + 1);
   }
-  // If maximum retries exceeded or error is not quota related, throw error
   throw error;
 }
 
-// MAIN HANDLER
+// Main handler
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Use POST only." });
@@ -282,7 +271,7 @@ export default async function handler(req, res) {
     });
   }
 
-  const { startDate, endDate } = req.body; // Get dates from request body
+  const { startDate, endDate, jobSources } = req.body;
   let dateToUse = startDate;
 
   if (!startDate || !/^\d{4}-\d{2}-\d{2}$/.test(startDate)) {
@@ -297,13 +286,13 @@ export default async function handler(req, res) {
     const sheets = await authenticateGoogleSheets(
       GOOGLE_APPLICATION_CREDENTIALS
     );
-    const jobs = await fetchJobs(WORKIZ_API_TOKEN, dateToUse);
+    const jobs = await fetchJobs(WORKIZ_API_TOKEN, dateToUse, jobSources);
 
     if (!jobs.length) {
       return res.status(200).json({ message: "No jobs found." });
     }
 
-    // Filter jobs by JobDateTime range if endDate provided
+    // Filter by endDate if provided
     const filteredJobs = endDate
       ? jobs.filter((job) => {
           const jobDate = new Date(job.JobDateTime);

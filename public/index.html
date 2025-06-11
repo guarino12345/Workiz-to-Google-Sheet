@@ -48,7 +48,8 @@
         text-align: left;
       }
 
-      input[type="date"] {
+      input[type="date"],
+      textarea {
         width: 100%;
         padding: 0.5rem 0.75rem;
         font-size: 1rem;
@@ -56,11 +57,19 @@
         border-radius: var(--border-radius);
         transition: border-color 0.3s ease;
         box-sizing: border-box;
+        font-family: inherit;
       }
 
-      input[type="date"]:focus {
+      input[type="date"]:focus,
+      textarea:focus {
         border-color: var(--accent-color);
         outline: none;
+      }
+
+      textarea {
+        resize: vertical;
+        min-height: 60px;
+        max-height: 120px;
       }
 
       button {
@@ -133,6 +142,14 @@
         />
         <label for="end-date">Select End Date (Optional)</label>
         <input type="date" id="end-date" name="end-date" />
+        <label for="job-sources">Job Sources (comma-separated)</label>
+        <textarea
+          id="job-sources"
+          name="job-sources"
+          rows="3"
+          placeholder="Enter job sources, separated by commas"
+          aria-label="Job Sources"
+        ></textarea>
         <button type="submit" id="sync-button">Start Sync</button>
       </form>
       <div class="progress-container" aria-hidden="true">
@@ -153,12 +170,19 @@
       const syncButton = document.getElementById("sync-button");
       const startDateInput = document.getElementById("start-date");
       const endDateInput = document.getElementById("end-date");
+      const jobSourcesInput = document.getElementById("job-sources");
 
       form.addEventListener("submit", async (event) => {
         event.preventDefault();
 
         const startDate = startDateInput.value;
         const endDate = endDateInput.value; // Get the end date
+        const jobSourcesRaw = jobSourcesInput.value;
+        // Parse job sources into array trimming whitespace and filtering empty strings
+        const jobSources = jobSourcesRaw
+          .split(",")
+          .map((src) => src.trim())
+          .filter((src) => src.length > 0);
 
         if (!startDate) {
           alert("Please select a start date.");
@@ -166,7 +190,8 @@
         }
 
         startDateInput.disabled = true;
-        endDateInput.disabled = true; // Disable end date input
+        endDateInput.disabled = true;
+        jobSourcesInput.disabled = true;
         syncButton.disabled = true;
         progressBar.style.width = "0%";
         progressBar.textContent = "0%";
@@ -187,7 +212,7 @@
           const response = await fetch("/api/sync", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ startDate, endDate }), // Include end date
+            body: JSON.stringify({ startDate, endDate, jobSources }), // Include job sources
           });
 
           clearInterval(progressInterval);
@@ -215,7 +240,8 @@
         } finally {
           syncButton.disabled = false;
           startDateInput.disabled = false;
-          endDateInput.disabled = false; // Re-enable end date input
+          endDateInput.disabled = false;
+          jobSourcesInput.disabled = false;
         }
       });
     </script>
